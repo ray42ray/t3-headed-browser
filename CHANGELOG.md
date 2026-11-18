@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 (2026-11-17)
+
+- `install --gpu` makes the browser render on a real GPU instead of SwiftShader. The shim drops Playwright's `--disable-gpu` and `--enable-unsafe-swiftshader` and runs ANGLE on EGL through the DRI render node, so WebGL reports the actual GPU. A SwiftShader renderer is a strong bot signal for checks such as PerimeterX. If the render node isn't accessible at launch, the shim keeps software rendering. `--no-gpu` turns it off, and `status` shows it.
+
+## 0.1.1
+
+- T3's HTML previews, which launch the shell with `--headless=new`, run the original headless shell.
+- The shim disables WebAuthn (merged into Playwright's `--disable-blink-features`), because a headed browser's passkey prompt can't be shown in the panel and blocks the page.
+- The shim sets `XAUTHORITY` to `~/.Xauthority` unless the inherited one belongs to the same display.
+
 ## 0.1.0 (2026-10-17)
 
 First release.
