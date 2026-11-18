@@ -11,7 +11,7 @@
 # https://github.com/Tarsow/t3-headed-browser
 set -euo pipefail
 
-version=0.1.0
+version=0.2.0
 t3_home="${T3CODE_HOME:-$HOME/.t3}"
 root="$t3_home/tools/chrome-headless-shell"
 config="${XDG_CONFIG_HOME:-$HOME/.config}/t3-headed-browser/config"
@@ -33,11 +33,13 @@ usage() {
 Usage: t3-headed-browser <command> [options]
 
 Commands:
-  install [--browser PATH] [--display :N]
+  install [--browser PATH] [--display :N] [--gpu | --gpu=NODE | --no-gpu]
               Swap every installed T3 server browser for the shim. Options are
               saved to $config
               and reused on later runs. Defaults: the first browser found
-              among Chrome, Chromium, Brave and Edge, and display :99.
+              among Chrome, Chromium, Brave and Edge, display :99, and no GPU.
+              --gpu renders on a real GPU instead of SwiftShader, through the
+              DRI render node NODE (default: the first /dev/dri/renderD*).
   uninstall   Put the original chrome-headless-shell binaries back.
   status      Show the configuration and each installed shell's state.
   version     Print the version.
@@ -50,20 +52,21 @@ die() {
 }
 
 read_config() {
-  browser="" display=":99"
+  browser="" display=":99" gpu=""
   [ -r "$config" ] || return 0
   local key value
   while IFS='=' read -r key value; do
     case $key in
       browser) browser=$value ;;
       display) display=$value ;;
+      gpu) gpu=$value ;;
     esac
   done <"$config"
 }
 
 write_config() {
   mkdir -p "$(dirname "$config")"
-  printf 'browser=%s\ndisplay=%s\n' "$browser" "$display" >"$config"
+  printf 'browser=%s\ndisplay=%s\ngpu=%s\n' "$browser" "$display" "$gpu" >"$config"
 }
 
 detect_browser() {
@@ -71,6 +74,17 @@ detect_browser() {
   for candidate in "${candidates[@]}"; do
     if [ -x "$candidate" ]; then
       echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_gpu() {
+  local node
+  for node in "${T3_HEADED_BROWSER_DRI_DIR:-/dev/dri}"/renderD*; do
+    if [ -c "$node" ] || [ -f "$node" ]; then
+      echo "$node"
       return 0
     fi
   done
@@ -90,6 +104,8 @@ shim() {
   printf 'browser=${T3_HEADED_BROWSER:-%q}\n' "$browser"
   # shellcheck disable=SC2016
   printf 'display=${T3_HEADED_BROWSER_DISPLAY:-%q}\n' "$display"
+  # shellcheck disable=SC2016
+  printf 'gpu=${T3_HEADED_BROWSER_GPU-%q}\n' "$gpu"
   cat <<'SHIM'
 # T3 Code launches this file as its headless server browser. Run a full, headed
 # Chromium on an X display instead. Written by t3-headed-browser
@@ -97,20 +113,42 @@ shim() {
 here=$(dirname "$(readlink -f "$0")")
 real="$here/chrome-headless-shell.real"
 x11="${T3_HEADED_BROWSER_X11_DIR:-/tmp/.X11-unix}"
-for arg in "$@"; do [ "$arg" = --version ] && exec "$real" "$@"; done
+# T3's HTML previews launch the shell directly with --headless=new and render
+# the agent's own pages, which need no real browser. Playwright, which runs the
+# browser panel, passes plain --headless.
+for arg in "$@"; do
+  case $arg in --version | --headless=new) exec "$real" "$@" ;; esac
+done
 if [ ! -x "$browser" ] || [ ! -S "$x11/X${display#:}" ]; then
   exec "$real" "$@"
 fi
-args=() profile="" windowless=""
+# With a usable GPU render node, drop Playwright's software-only GPU flags so
+# WebGL reports the real GPU rather than SwiftShader, which bot checks flag.
+# Xvfb has no hardware GL, so ANGLE renders through EGL on the render node.
+hw=""
+[ -n "$gpu" ] && [ -r "$gpu" ] && [ -w "$gpu" ] && hw=1
+args=() profile="" windowless="" blink=""
 for arg in "$@"; do
   case $arg in
     --headless | --headless=* | --hide-scrollbars) continue ;;
+    --disable-gpu | --enable-unsafe-swiftshader | --use-angle=* | --use-gl=*) [ -n "$hw" ] && continue ;;
     --user-data-dir=*) profile=${arg#*=} ;;
     --no-startup-window) windowless=1 ;;
+    # Chromium keeps only the last copy of a switch, so merge into Playwright's.
+    --disable-blink-features=*) arg="$arg,WebAuth" blink=1 ;;
   esac
   args+=("$arg")
 done
-export DISPLAY="$display" XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+[ -n "$hw" ] && args+=(--use-gl=angle --use-angle=gl-egl)
+# A headed browser shows its own passkey prompt, which the panel can't show and
+# which blocks the page. Without WebAuthn, sites offer other sign-in methods.
+[ -n "$blink" ] || args+=(--disable-blink-features=WebAuth)
+# An inherited XAUTHORITY belongs to the inherited DISPLAY, such as a desktop
+# session's file, and has no cookie for another display like Xvfb's.
+if [ "${DISPLAY:-}" != "$display" ] || [ -z "${XAUTHORITY:-}" ]; then
+  XAUTHORITY="$HOME/.Xauthority"
+fi
+export DISPLAY="$display" XAUTHORITY
 if [ -n "$windowless" ] || [ -z "$profile" ]; then
   exec "$browser" "${args[@]}"
 fi
@@ -164,6 +202,9 @@ cmd_install() {
       --browser=*) browser=${1#*=}; shift ;;
       --display) [ $# -ge 2 ] || die "--display needs a value like :99"; display=$2; shift 2 ;;
       --display=*) display=${1#*=}; shift ;;
+      --gpu) gpu=$(detect_gpu) || die "no GPU render node under ${T3_HEADED_BROWSER_DRI_DIR:-/dev/dri}; pass --gpu=NODE"; shift ;;
+      --gpu=*) gpu=${1#*=}; shift ;;
+      --no-gpu) gpu=""; shift ;;
       *) die "unknown option: $1" ;;
     esac
   done
@@ -175,7 +216,9 @@ cmd_install() {
     :[0-9]*) ;;
     *) die "display must look like :99, got '$display'" ;;
   esac
+  [ -z "$gpu" ] || [ -e "$gpu" ] || die "no such GPU render node: $gpu"
   write_config
+  [ -z "$gpu" ] || { [ -r "$gpu" ] && [ -w "$gpu" ]; } || echo "warning: $gpu isn't readable and writable by $(id -un); the shim keeps software rendering until it is (add the user to the render group)" >&2
   display_up || echo "warning: no X server on $display yet; the shim uses the headless shell until one runs" >&2
 
   local exe found=""
@@ -211,6 +254,9 @@ cmd_status() {
   read_config
   echo "browser: ${browser:-not configured}"
   if display_up; then echo "display: $display (running)"; else echo "display: $display (not running)"; fi
+  if [ -z "$gpu" ]; then echo "gpu: off (SwiftShader)"
+  elif [ -r "$gpu" ] && [ -w "$gpu" ]; then echo "gpu: $gpu"
+  else echo "gpu: $gpu (not accessible; using SwiftShader)"; fi
   local exe found=""
   while IFS= read -r exe; do
     found=1

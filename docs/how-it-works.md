@@ -44,6 +44,18 @@ A full Chromium build passes, and the headless shell doesn't. This tool runs the
    - opens the first page with a second invocation, `browser --user-data-dir=<same profile> about:blank`. Chromium hands that request to the running instance, which satisfies Playwright's wait for an initial page;
    - waits for the browser, passes on `TERM`, `INT` and `HUP`, and exits with the browser's status.
 
+6. **GPU rendering** (optional, `install --gpu`). Playwright launches with `--disable-gpu --enable-unsafe-swiftshader`, so WebGL reports `ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)))`. Real desktops almost never report SwiftShader, and bot checks such as PerimeterX (HUMAN) weigh it heavily. With a GPU configured and its DRI render node readable and writable, the shim drops `--disable-gpu`, `--enable-unsafe-swiftshader` and any `--use-gl=`/`--use-angle=` flags, and adds `--use-gl=angle --use-angle=gl-egl`. Xvfb has no hardware GLX (ANGLE's default GL backend gets llvmpipe there, and a plain launch on Xvfb blocklists WebGL entirely), but EGL reaches the GPU through the render node directly. If the node isn't accessible at launch, for example after the user loses the seat ACL, the shim keeps the software flags so WebGL still works.
+
+   Measured with Brave 1.99 (Chromium 157) on Xvfb, Intel UHD 630:
+
+   | Flags | WebGL renderer |
+   | --- | --- |
+   | `--disable-gpu --enable-unsafe-swiftshader` (T3's) | `ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) …), SwiftShader driver)` |
+   | none | no WebGL |
+   | `--use-angle=gl` | `ANGLE (Mesa, llvmpipe (LLVM 20.1.2 256 bits), OpenGL 4.5)` |
+   | `--use-angle=vulkan` + Vulkan features | `ANGLE (Intel, Vulkan 1.4.318 (Intel(R) UHD Graphics 630 …), Intel open-source Mesa driver)` |
+   | `--use-gl=angle --use-angle=gl-egl` (the shim's) | `ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL ES 3.2)` |
+
 The shim receives Playwright's `--remote-debugging-pipe` file descriptors (3 and 4) and passes them on unchanged. The second invocation runs with them closed.
 
 ## Staying applied after T3 updates
@@ -60,7 +72,8 @@ The path unit watches `linux64`; on ARM64 hosts, change it to `linux-arm64`. It 
 | --- | --- |
 | Browser executable | `install --browser PATH`. Saved as `browser=` in `${XDG_CONFIG_HOME:-~/.config}/t3-headed-browser/config`. |
 | X display | `install --display :N`. Saved as `display=`; the default is `:99`. |
-| Per-launch override | The environment variables `T3_HEADED_BROWSER` and `T3_HEADED_BROWSER_DISPLAY`, read by the shim at launch time. They must be set in the T3 service's environment. |
+| GPU | `install --gpu` (first `/dev/dri/renderD*`), `--gpu=NODE`, or `--no-gpu`. Saved as `gpu=`; empty means off, the default. |
+| Per-launch override | The environment variables `T3_HEADED_BROWSER`, `T3_HEADED_BROWSER_DISPLAY` and `T3_HEADED_BROWSER_GPU` (empty turns the GPU off), read by the shim at launch time. They must be set in the T3 service's environment. |
 | T3 home | `T3CODE_HOME`, default `~/.t3`. |
 
 Point `--browser` at the real binary, such as `/opt/google/chrome/chrome` or `/opt/brave.com/brave/brave`, rather than at a launcher script in `/usr/bin`. The shim then watches the browser's own PID. A launcher that runs the browser as a child process still works. Snap-packaged browsers are untested.
@@ -73,4 +86,5 @@ After changing the configuration, run `t3-headed-browser install` again. Shims t
 - **Tabs still look headless.** T3 keeps a headless browser it already started running, even with no tabs open. Stop it with `pkill -f chrome-headless-shell`. That closes its tabs. The next tab you open starts through the shim.
 - **`browserContext.newPage: Target page, context or browser has been closed`.** Something other than this shim runs a headed browser for T3, or the browser exited at startup. Run the browser by hand on the same display to see its errors: `DISPLAY=:99 /opt/brave.com/brave/brave --user-data-dir=$(mktemp -d) about:blank`.
 - **Profile from a newer browser.** T3's profiles live in `~/.t3/userdata/server-browser/profiles/`. If the browser you configured is older than the Chromium that last wrote a profile, it may refuse that profile. Back the profile up first, then move it aside or use a newer browser.
+- **WebGL still reports SwiftShader with `--gpu`.** Check `t3-headed-browser status`. The T3 service user needs read and write access to the render node: add it to the `render` group (`sudo usermod -aG render $USER`, then restart T3) rather than relying on the desktop seat ACL. Then stop the running browser so the next tab relaunches through the shim.
 - **Re-application log.** Run `journalctl --user -u t3-headed-browser.service`.

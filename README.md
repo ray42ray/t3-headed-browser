@@ -27,7 +27,7 @@ install -Dm644 systemd/t3-xvfb.service -t ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now t3-xvfb.service
 
 # Swap the shell, and re-apply the swap whenever T3 downloads a new one.
-t3-headed-browser install            # or: install --browser /opt/google/chrome/chrome --display :99
+t3-headed-browser install            # or: install --browser /opt/google/chrome/chrome --display :99 --gpu
 install -Dm644 systemd/t3-headed-browser.path systemd/t3-headed-browser.service -t ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now t3-headed-browser.path
 ```

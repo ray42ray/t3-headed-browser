@@ -72,14 +72,20 @@ run_shim --version
 check "--version runs the original shell" 'grep -qx "REAL --version" "$log"'
 
 run_shim --no-startup-window --headless --hide-scrollbars --user-data-dir="$work/tmpprofile" --remote-debugging-pipe
-check "shared browser launch drops headless flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --user-data-dir=$work/tmpprofile --remote-debugging-pipe$" "$log"'
+check "shared browser launch drops headless flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --user-data-dir=$work/tmpprofile --remote-debugging-pipe --disable-blink-features=WebAuth$" "$log"'
 check "shared browser launch opens no extra page" '[ "$(grep -c "^BROWSER" "$log")" = 1 ]'
 
 run_shim --headless --hide-scrollbars --user-data-dir="$work/profile" --remote-debugging-pipe about:blank
 status=$?
-check "persistent launch starts the browser windowless" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --user-data-dir=$work/profile --remote-debugging-pipe about:blank$" "$log"'
+check "persistent launch starts the browser windowless" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --user-data-dir=$work/profile --remote-debugging-pipe about:blank --disable-blink-features=WebAuth$" "$log"'
 check "persistent launch opens the first page in the same profile" 'grep -q "^BROWSER DISPLAY=:99 --user-data-dir=$work/profile --no-first-run about:blank$" "$log"'
 check "shim exits with the browser's status" '[ "$status" = 7 ]'
+
+run_shim --headless=new --screenshot about:blank
+check "HTML previews (--headless=new) run the original shell" 'grep -qx "REAL --headless=new --screenshot about:blank" "$log"'
+
+run_shim --headless --no-startup-window --disable-blink-features=AutomationControlled
+check "WebAuthn is merged into Playwright's disabled blink features" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-blink-features=AutomationControlled,WebAuth$" "$log"'
 
 T3_HEADED_BROWSER_DISPLAY=:42 run_shim --headless --no-startup-window
 check "missing display falls back to the original shell" 'grep -qx "REAL --headless --no-startup-window" "$log"'
@@ -90,6 +96,32 @@ check "missing browser falls back to the original shell" 'grep -qx "REAL --headl
 x11_down
 run_shim --headless --no-startup-window
 check "stopped X server falls back to the original shell" 'grep -qx "REAL --headless --no-startup-window" "$log"'
+
+echo "# gpu"
+x11_up
+mkdir -p "$work/dri" && : >"$work/dri/renderD128"
+export T3_HEADED_BROWSER_DRI_DIR="$work/dri"
+run_shim --headless --no-startup-window --disable-gpu --enable-unsafe-swiftshader --mute-audio
+check "gpu off keeps the software flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --enable-unsafe-swiftshader --mute-audio --disable-blink-features=WebAuth$" "$log"'
+out=$("$tool" install --gpu 2>&1)
+check "install --gpu saves the detected render node" 'grep -qx "gpu=$work/dri/renderD128" "$XDG_CONFIG_HOME/t3-headed-browser/config"'
+check "status shows the gpu" '[[ $("$tool" status) == *"gpu: $work/dri/renderD128"* ]]'
+run_shim --headless --no-startup-window --disable-gpu --enable-unsafe-swiftshader --mute-audio
+check "gpu on swaps the software flags for ANGLE on EGL" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --mute-audio --use-gl=angle --use-angle=gl-egl --disable-blink-features=WebAuth$" "$log"'
+chmod 000 "$work/dri/renderD128"
+if [ -r "$work/dri/renderD128" ]; then
+  pass "inaccessible render node keeps the software flags (skipped as root)"
+else
+  run_shim --headless --no-startup-window --disable-gpu --enable-unsafe-swiftshader
+  check "inaccessible render node keeps the software flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --enable-unsafe-swiftshader --disable-blink-features=WebAuth$" "$log"'
+fi
+chmod 644 "$work/dri/renderD128"
+T3_HEADED_BROWSER_GPU= run_shim --headless --no-startup-window --disable-gpu
+check "an empty T3_HEADED_BROWSER_GPU turns the gpu off" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --disable-blink-features=WebAuth$" "$log"'
+check "install rejects a missing render node" '! "$tool" install --gpu="$work/dri/nope" 2>/dev/null'
+"$tool" install --no-gpu >/dev/null 2>&1
+check "install --no-gpu turns it off" 'grep -qx "gpu=" "$XDG_CONFIG_HOME/t3-headed-browser/config"'
+x11_down
 
 echo "# new T3 browser version"
 new_dir="$T3CODE_HOME/tools/chrome-headless-shell/linux64/155.0.0.0"
