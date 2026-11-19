@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0 (2026-11-19)
+
+- The panel reports `Google Chrome`, not `Brave`, in the brands a site reads. Brave's user agent already looked like Chrome, but `Sec-CH-UA` and `navigator.brave` still gave it away, and Brave is missing from the browser list Microsoft Conditional Access lets through. A small extension, loaded for the panel only, swaps the brand in `sec-ch-ua`, `sec-ch-ua-full-version-list` and `navigator.userAgentData`, and hides `navigator.brave`. `install --brand brave` keeps the browser's own brand; `--brand chrome` is the default and the `T3_HEADED_BROWSER_BRAND` variable overrides it per launch.
+- `install` now stops the T3 browser on every run, not only when it shims a binary for the first time, so a changed browser, brand or GPU setting takes effect on the next tab instead of the next crash.
+
 ## 0.2.0 (2026-11-17)
 
 - `install --gpu` makes the browser render on a real GPU instead of SwiftShader. The shim drops Playwright's `--disable-gpu` and `--enable-unsafe-swiftshader` and runs ANGLE on EGL through the DRI render node, so WebGL reports the actual GPU. A SwiftShader renderer is a strong bot signal for checks such as PerimeterX. If the render node isn't accessible at launch, the shim keeps software rendering. `--no-gpu` turns it off, and `status` shows it.
