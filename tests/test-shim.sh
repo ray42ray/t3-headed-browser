@@ -15,6 +15,7 @@ trap 'rm -rf "$work"' EXIT
 export T3CODE_HOME="$work/t3" XDG_CONFIG_HOME="$work/config" T3_HEADED_BROWSER_X11_DIR="$work/x11"
 unset T3_HEADED_BROWSER T3_HEADED_BROWSER_DISPLAY
 log="$work/calls.log"
+ext="$XDG_CONFIG_HOME/t3-headed-browser/extension"
 shell_dir="$T3CODE_HOME/tools/chrome-headless-shell/linux64/154.0.0.0"
 shell="$shell_dir/chrome-headless-shell"
 passed=0 failed=0
@@ -37,6 +38,7 @@ chmod 755 "$shell"
 browser="$work/fake-browser"
 cat >"$browser" <<EOF
 #!/bin/bash
+[ "\$1" = --version ] && { echo "Fake Browser 157.1.99.57 unknown"; exit 0; }
 echo "BROWSER DISPLAY=\$DISPLAY \$*" >>"$log"
 profile=""
 for arg in "\$@"; do case \$arg in --user-data-dir=*) profile=\${arg#*=} ;; esac; done
@@ -63,21 +65,24 @@ check "install reports the shimmed shell" '[[ $out == *"shimmed $shell"* ]]'
 check "original binary kept as .real" '[ -x "$shell.real" ] && grep -q REAL "$shell.real"'
 check "shim carries the marker" '[ "$(sed -n 2p "$shell")" = "# t3-headed-browser shim" ]'
 check "config saved" 'grep -qx "browser=$browser" "$XDG_CONFIG_HOME/t3-headed-browser/config" && grep -qx "display=:99" "$XDG_CONFIG_HOME/t3-headed-browser/config"'
+check "install writes the brand extension" '[ -f "$ext/manifest.json" ] && [ -f "$ext/brand.js" ]'
+check "the extension reports Chrome at the browser's version" 'grep -q "Google Chrome" "$ext/rules.json" && grep -q "157" "$ext/rules.json"'
 "$tool" install >/dev/null 2>&1
 check "reinstall keeps one .real and refreshes the shim" '[ "$(find "$shell_dir" -name "chrome-headless-shell*" | wc -l)" = 2 ] && grep -q REAL "$shell.real"'
 check "status lists the shim" '[[ $("$tool" status) == *"shimmed:  $shell"* ]]'
+check "status shows the reported brand" '[[ $("$tool" status) == *"brand: Google Chrome"* ]]'
 
 echo "# shim"
 run_shim --version
 check "--version runs the original shell" 'grep -qx "REAL --version" "$log"'
 
 run_shim --no-startup-window --headless --hide-scrollbars --user-data-dir="$work/tmpprofile" --remote-debugging-pipe
-check "shared browser launch drops headless flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --user-data-dir=$work/tmpprofile --remote-debugging-pipe --disable-blink-features=WebAuth$" "$log"'
+check "shared browser launch drops headless flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --user-data-dir=$work/tmpprofile --remote-debugging-pipe --disable-blink-features=WebAuth --disable-extensions-except=$ext --load-extension=$ext$" "$log"'
 check "shared browser launch opens no extra page" '[ "$(grep -c "^BROWSER" "$log")" = 1 ]'
 
 run_shim --headless --hide-scrollbars --user-data-dir="$work/profile" --remote-debugging-pipe about:blank
 status=$?
-check "persistent launch starts the browser windowless" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --user-data-dir=$work/profile --remote-debugging-pipe about:blank --disable-blink-features=WebAuth$" "$log"'
+check "persistent launch starts the browser windowless" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --user-data-dir=$work/profile --remote-debugging-pipe about:blank --disable-blink-features=WebAuth --disable-extensions-except=$ext --load-extension=$ext$" "$log"'
 check "persistent launch opens the first page in the same profile" 'grep -q "^BROWSER DISPLAY=:99 --user-data-dir=$work/profile --no-first-run about:blank$" "$log"'
 check "shim exits with the browser's status" '[ "$status" = 7 ]'
 
@@ -85,7 +90,7 @@ run_shim --headless=new --screenshot about:blank
 check "HTML previews (--headless=new) run the original shell" 'grep -qx "REAL --headless=new --screenshot about:blank" "$log"'
 
 run_shim --headless --no-startup-window --disable-blink-features=AutomationControlled
-check "WebAuthn is merged into Playwright's disabled blink features" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-blink-features=AutomationControlled,WebAuth$" "$log"'
+check "WebAuthn is merged into Playwright's disabled blink features" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-blink-features=AutomationControlled,WebAuth --disable-extensions-except=$ext --load-extension=$ext$" "$log"'
 
 T3_HEADED_BROWSER_DISPLAY=:42 run_shim --headless --no-startup-window
 check "missing display falls back to the original shell" 'grep -qx "REAL --headless --no-startup-window" "$log"'
@@ -102,26 +107,49 @@ x11_up
 mkdir -p "$work/dri" && : >"$work/dri/renderD128"
 export T3_HEADED_BROWSER_DRI_DIR="$work/dri"
 run_shim --headless --no-startup-window --disable-gpu --enable-unsafe-swiftshader --mute-audio
-check "gpu off keeps the software flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --enable-unsafe-swiftshader --mute-audio --disable-blink-features=WebAuth$" "$log"'
+check "gpu off keeps the software flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --enable-unsafe-swiftshader --mute-audio --disable-blink-features=WebAuth --disable-extensions-except=$ext --load-extension=$ext$" "$log"'
 out=$("$tool" install --gpu 2>&1)
 check "install --gpu saves the detected render node" 'grep -qx "gpu=$work/dri/renderD128" "$XDG_CONFIG_HOME/t3-headed-browser/config"'
 check "status shows the gpu" '[[ $("$tool" status) == *"gpu: $work/dri/renderD128"* ]]'
 run_shim --headless --no-startup-window --disable-gpu --enable-unsafe-swiftshader --mute-audio
-check "gpu on swaps the software flags for ANGLE on EGL" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --mute-audio --use-gl=angle --use-angle=gl-egl --disable-blink-features=WebAuth$" "$log"'
+check "gpu on swaps the software flags for ANGLE on EGL" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --mute-audio --use-gl=angle --use-angle=gl-egl --disable-blink-features=WebAuth --disable-extensions-except=$ext --load-extension=$ext$" "$log"'
 chmod 000 "$work/dri/renderD128"
 if [ -r "$work/dri/renderD128" ]; then
   pass "inaccessible render node keeps the software flags (skipped as root)"
 else
   run_shim --headless --no-startup-window --disable-gpu --enable-unsafe-swiftshader
-  check "inaccessible render node keeps the software flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --enable-unsafe-swiftshader --disable-blink-features=WebAuth$" "$log"'
+  check "inaccessible render node keeps the software flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --enable-unsafe-swiftshader --disable-blink-features=WebAuth --disable-extensions-except=$ext --load-extension=$ext$" "$log"'
 fi
 chmod 644 "$work/dri/renderD128"
 T3_HEADED_BROWSER_GPU= run_shim --headless --no-startup-window --disable-gpu
-check "an empty T3_HEADED_BROWSER_GPU turns the gpu off" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --disable-blink-features=WebAuth$" "$log"'
+check "an empty T3_HEADED_BROWSER_GPU turns the gpu off" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --disable-blink-features=WebAuth --disable-extensions-except=$ext --load-extension=$ext$" "$log"'
 check "install rejects a missing render node" '! "$tool" install --gpu="$work/dri/nope" 2>/dev/null'
 "$tool" install --no-gpu >/dev/null 2>&1
 check "install --no-gpu turns it off" 'grep -qx "gpu=" "$XDG_CONFIG_HOME/t3-headed-browser/config"'
+echo "# brand"
+out=$("$tool" install --brand brave 2>&1)
+check "install --brand brave keeps the browser's own brand" 'grep -qx "brand=brave" "$XDG_CONFIG_HOME/t3-headed-browser/config"'
+run_shim --headless --no-startup-window --disable-gpu
+check "brand brave drops the extension flags" 'grep -q "^BROWSER DISPLAY=:99 --no-startup-window --disable-gpu --disable-blink-features=WebAuth$" "$log"'
+T3_HEADED_BROWSER_BRAND=chrome run_shim --headless --no-startup-window --disable-gpu
+check "the brand can be overridden per launch" 'grep -q -- "--disable-extensions-except=$ext" "$log"'
+"$tool" install --brand chrome >/dev/null 2>&1
 x11_down
+
+echo "# restart"
+prof="$T3CODE_HOME/userdata/server-browser/profiles/tmp"
+"$browser" --no-startup-window --user-data-dir="$prof" >/dev/null 2>&1 &
+live=$!
+sleep 0.3
+out=$("$tool" install --brand brave 2>&1)
+check "a changed configuration stops the running browser" '[[ $out == *"stopped browser"* ]] && ! kill -0 "$live" 2>/dev/null'
+"$browser" --no-startup-window --user-data-dir="$prof" >/dev/null 2>&1 &
+live=$!
+sleep 0.3
+out=$("$tool" install --brand brave 2>&1)
+check "install also restarts on an unchanged shim" '[[ $out == *"stopped browser"* ]] && ! kill -0 "$live" 2>/dev/null'
+kill "$live" 2>/dev/null
+"$tool" install --brand chrome >/dev/null 2>&1
 
 echo "# new T3 browser version"
 new_dir="$T3CODE_HOME/tools/chrome-headless-shell/linux64/155.0.0.0"
@@ -132,11 +160,13 @@ check "install reuses the saved browser" '[[ $out == *"shimmed $new_dir/chrome-h
 echo "# uninstall"
 "$tool" uninstall >/dev/null
 check "uninstall restores the originals" 'grep -q REAL "$shell" && grep -q REAL "$new_dir/chrome-headless-shell" && [ ! -e "$shell.real" ]'
+check "uninstall removes the brand extension" '[ ! -e "$ext" ]'
 check "status shows the originals" '[[ $("$tool" status) == *"original: $shell"* ]]'
 
 echo "# errors"
 check "install rejects a bad display" '! "$tool" install --display 99 2>/dev/null'
 check "install rejects a missing browser" '! "$tool" install --browser "$work/missing" 2>/dev/null'
+check "install rejects an unknown brand" '! "$tool" install --brand firefox 2>/dev/null'
 check "unknown command exits 2" '"$tool" frobnicate >/dev/null 2>&1; [ $? = 2 ]'
 
 echo

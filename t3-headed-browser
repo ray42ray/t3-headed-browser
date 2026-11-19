@@ -11,10 +11,11 @@
 # https://github.com/Tarsow/t3-headed-browser
 set -euo pipefail
 
-version=0.2.0
+version=0.3.0
 t3_home="${T3CODE_HOME:-$HOME/.t3}"
 root="$t3_home/tools/chrome-headless-shell"
 config="${XDG_CONFIG_HOME:-$HOME/.config}/t3-headed-browser/config"
+extension="${config%/*}/extension"
 x11="${T3_HEADED_BROWSER_X11_DIR:-/tmp/.X11-unix}"
 marker="# t3-headed-browser shim"
 
@@ -34,12 +35,15 @@ Usage: t3-headed-browser <command> [options]
 
 Commands:
   install [--browser PATH] [--display :N] [--gpu | --gpu=NODE | --no-gpu]
+              [--brand chrome | --brand brave]
               Swap every installed T3 server browser for the shim. Options are
               saved to $config
               and reused on later runs. Defaults: the first browser found
               among Chrome, Chromium, Brave and Edge, display :99, and no GPU.
               --gpu renders on a real GPU instead of SwiftShader, through the
               DRI render node NODE (default: the first /dev/dri/renderD*).
+              --brand chrome reports Google Chrome in the brands a site reads
+              (the default), --brand brave reports the browser's own brand.
   uninstall   Put the original chrome-headless-shell binaries back.
   status      Show the configuration and each installed shell's state.
   version     Print the version.
@@ -52,7 +56,7 @@ die() {
 }
 
 read_config() {
-  browser="" display=":99" gpu=""
+  browser="" display=":99" gpu="" brand=chrome
   [ -r "$config" ] || return 0
   local key value
   while IFS='=' read -r key value; do
@@ -60,13 +64,14 @@ read_config() {
       browser) browser=$value ;;
       display) display=$value ;;
       gpu) gpu=$value ;;
+      brand) brand=$value ;;
     esac
   done <"$config"
 }
 
 write_config() {
   mkdir -p "$(dirname "$config")"
-  printf 'browser=%s\ndisplay=%s\ngpu=%s\n' "$browser" "$display" "$gpu" >"$config"
+  printf 'browser=%s\ndisplay=%s\ngpu=%s\nbrand=%s\n' "$browser" "$display" "$gpu" "$brand" >"$config"
 }
 
 detect_browser() {
@@ -106,6 +111,10 @@ shim() {
   printf 'display=${T3_HEADED_BROWSER_DISPLAY:-%q}\n' "$display"
   # shellcheck disable=SC2016
   printf 'gpu=${T3_HEADED_BROWSER_GPU-%q}\n' "$gpu"
+  # shellcheck disable=SC2016
+  printf 'brand=${T3_HEADED_BROWSER_BRAND:-%q}\n' "$brand"
+  # shellcheck disable=SC2016
+  printf 'ext=%q\n' "$extension"
   cat <<'SHIM'
 # T3 Code launches this file as its headless server browser. Run a full, headed
 # Chromium on an X display instead. Written by t3-headed-browser
@@ -143,6 +152,13 @@ done
 # A headed browser shows its own passkey prompt, which the panel can't show and
 # which blocks the page. Without WebAuthn, sites offer other sign-in methods.
 [ -n "$blink" ] || args+=(--disable-blink-features=WebAuth)
+# Report Google Chrome in the brands a site can read. Brave is missing from
+# Microsoft's supported-browser list for Conditional Access, and its client
+# hints still say Brave even though its user agent already looks like Chrome.
+# The extension also hides navigator.brave. Other extensions stay disabled.
+if [ "$brand" = chrome ] && [ -f "$ext/manifest.json" ]; then
+  args+=(--disable-extensions-except="$ext" --load-extension="$ext")
+fi
 # An inherited XAUTHORITY belongs to the inherited DISPLAY, such as a desktop
 # session's file, and has no cookie for another display like Xvfb's.
 if [ "${DISPLAY:-}" != "$display" ] || [ -z "${XAUTHORITY:-}" ]; then
@@ -184,14 +200,111 @@ SHIM
 }
 
 # T3 launches a freshly installed shell straight away, usually before the shim
-# lands. Stop that headless browser so T3's next tab relaunches through the shim.
-stop_unshimmed() {
-  local pid
-  for pid in $(pgrep -u "$(id -u)" -f chrome-headless-shell || true); do
-    [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$1" ] || continue
-    tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | grep -q '^--type=' && continue
-    kill -TERM "$pid" 2>/dev/null && echo "stopped headless browser $pid; T3 relaunches it through the shim"
+# lands, and keeps the first browser it started for later tabs. Stop a browser
+# that still runs with the old shim or with the original shell, so T3's next tab
+# starts through the new one. Only this T3's own profile directory is touched,
+# never a browser the user opened.
+restart_browser() {
+  local pid exe cmd
+  for pid in $(pgrep -u "$(id -u)" -f chrome-headless-shell || true) \
+    $(pgrep -u "$(id -u)" -x "$(basename "$browser")" || true); do
+    cmd=$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null) || continue
+    grep -q '^--type=' <<<"$cmd" && continue
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+    if [ "$exe" != "$1" ] && ! grep -q -- "--user-data-dir=$t3_home/userdata/server-browser/" <<<"$cmd"; then
+      continue
+    fi
+    kill -TERM "$pid" 2>/dev/null && echo "stopped browser $pid; T3 relaunches it through the shim"
   done
+}
+
+# The brands a site reads. Written at install time so the version in the header
+# is the browser's own; Chrome's constant brand-grease value is kept.
+write_extension() {
+  local major
+  # "Brave Browser 157.1.99.57 unknown": the version is the first dotted word.
+  major=$("$browser" --version 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\./) { print $i; exit }}' || true)
+  major=${major%%.*}
+  case $major in '' | *[!0-9]*) major=0 ;; esac
+  mkdir -p "$extension"
+  cat >"$extension/manifest.json" <<'EOF'
+{
+  "manifest_version": 3,
+  "name": "t3-headed-browser: report Google Chrome",
+  "description": "Keeps the brand a site sees in line with the Chrome-like user agent.",
+  "version": "1",
+  "permissions": ["declarativeNetRequest"],
+  "host_permissions": ["<all_urls>"],
+  "declarative_net_request": {
+    "rule_resources": [{ "id": "brand", "enabled": true, "path": "rules.json" }]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["brand.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    }
+  ]
+}
+EOF
+  cat >"$extension/rules.json" <<EOF
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "sec-ch-ua",
+          "operation": "set",
+          "value": "\"Not-A.Brand\";v=\"99\", \"Google Chrome\";v=\"$major\", \"Chromium\";v=\"$major\""
+        },
+        {
+          "header": "sec-ch-ua-full-version-list",
+          "operation": "set",
+          "value": "\"Not-A.Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"$major.0.0.0\", \"Chromium\";v=\"$major.0.0.0\""
+        }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*",
+      "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest", "script", "stylesheet", "image", "font", "other"]
+    }
+  }
+]
+EOF
+  cat >"$extension/brand.js" <<'EOF'
+// Same substitution in JavaScript, where navigator.userAgentData is read. The
+// lists are derived from the browser's own, so the version and the grease brand
+// always match what the browser reports.
+(() => {
+  const real = navigator.userAgentData;
+  if (!real || !Array.isArray(real.brands)) return;
+  const swap = (list) =>
+    list.map((b) => (b.brand === "Brave" ? { brand: "Google Chrome", version: b.version } : b));
+  const fake = {
+    brands: swap(real.brands),
+    mobile: real.mobile,
+    platform: real.platform,
+    getHighEntropyValues(hints) {
+      return real.getHighEntropyValues(hints).then((v) => {
+        if (v.brands) v.brands = swap(v.brands);
+        if (v.fullVersionList) v.fullVersionList = swap(v.fullVersionList);
+        return v;
+      });
+    },
+    toJSON() {
+      return { brands: this.brands, mobile: this.mobile, platform: this.platform };
+    },
+  };
+  Object.defineProperty(Navigator.prototype, "userAgentData", { get: () => fake, configurable: true });
+  // navigator.brave is the other explicit Brave tell.
+  Object.defineProperty(Navigator.prototype, "brave", { value: undefined, configurable: true });
+})();
+EOF
 }
 
 cmd_install() {
@@ -205,6 +318,8 @@ cmd_install() {
       --gpu) gpu=$(detect_gpu) || die "no GPU render node under ${T3_HEADED_BROWSER_DRI_DIR:-/dev/dri}; pass --gpu=NODE"; shift ;;
       --gpu=*) gpu=${1#*=}; shift ;;
       --no-gpu) gpu=""; shift ;;
+      --brand) [ $# -ge 2 ] || die "--brand needs chrome or brave"; brand=$2; shift 2 ;;
+      --brand=*) brand=${1#*=}; shift ;;
       *) die "unknown option: $1" ;;
     esac
   done
@@ -217,7 +332,12 @@ cmd_install() {
     *) die "display must look like :99, got '$display'" ;;
   esac
   [ -z "$gpu" ] || [ -e "$gpu" ] || die "no such GPU render node: $gpu"
+  case $brand in
+    chrome | brave) ;;
+    *) die "brand must be chrome or brave, got '$brand'" ;;
+  esac
   write_config
+  write_extension
   [ -z "$gpu" ] || { [ -r "$gpu" ] && [ -w "$gpu" ]; } || echo "warning: $gpu isn't readable and writable by $(id -un); the shim keeps software rendering until it is (add the user to the render group)" >&2
   display_up || echo "warning: no X server on $display yet; the shim uses the headless shell until one runs" >&2
 
@@ -227,20 +347,23 @@ cmd_install() {
     if is_shim "$exe"; then
       shim >"$exe.new"
       chmod 755 "$exe.new"
+      # Shims only apply at launch, so stop a browser that runs an older one.
       mv -f "$exe.new" "$exe"
+      restart_browser "$exe.real"
       continue
     fi
     mv "$exe" "$exe.real"
     shim >"$exe"
     chmod 755 "$exe"
     echo "shimmed $exe"
-    stop_unshimmed "$exe.real"
+    restart_browser "$exe.real"
   done < <(shells)
   [ -n "$found" ] || echo "no T3 server browser under $root yet; run install again after T3 downloads it"
 }
 
 cmd_uninstall() {
   local exe
+  rm -rf "$extension"
   while IFS= read -r exe; do
     is_shim "$exe" || continue
     if [ -x "$exe.real" ]; then
@@ -257,6 +380,8 @@ cmd_status() {
   if [ -z "$gpu" ]; then echo "gpu: off (SwiftShader)"
   elif [ -r "$gpu" ] && [ -w "$gpu" ]; then echo "gpu: $gpu"
   else echo "gpu: $gpu (not accessible; using SwiftShader)"; fi
+  if [ "$brand" = chrome ]; then echo "brand: Google Chrome (Brave's own brand is hidden)"
+  else echo "brand: the browser's own"; fi
   local exe found=""
   while IFS= read -r exe; do
     found=1

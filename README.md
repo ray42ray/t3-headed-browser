@@ -34,7 +34,7 @@ systemctl --user daemon-reload && systemctl --user enable --now t3-headed-browse
 
 `install` picks the first browser it finds and saves your choice in `~/.config/t3-headed-browser/config`. If T3 has already started its headless browser, `install` stops it so that your next tab uses the new browser. Any server-browser tabs open at that moment close.
 
-Check the result with `t3-headed-browser status`. Then open a tab in the browser panel and run `navigator.webdriver, typeof window.chrome, navigator.plugins.length` in it. You should get `false`, `"object"`, and a number above 0.
+Check the result with `t3-headed-browser status`. Then open a tab in the browser panel and run `navigator.webdriver, typeof window.chrome, navigator.plugins.length, navigator.userAgentData.brands` in it. You should get `false`, `"object"`, a number above 0, and a brand list that says `Google Chrome` rather than `Brave`. With `--brand brave` the list keeps the browser's own brand.
 
 ## Uninstall
 
@@ -46,6 +46,8 @@ rm ~/.local/bin/t3-headed-browser ~/.config/systemd/user/t3-headed-browser.{path
 
 ## Caveats
 
+- The brand swap only changes what a site sees, not what the device is. A policy that demands a managed device, such as Microsoft's Conditional Access on a Linux box, still sees an unregistered machine.
+- Isolated and incognito tabs in the panel keep the browser's own brand; Chromium gives extensions no incognito context there.
 - This is unofficial. It relies on T3 checking only that its pinned browser path is an executable file. A change in T3 could break it. If the browser or the display is missing, the shim falls back to the original shell, so the panel keeps working, but headless again.
 - A visible browser uses more memory than the headless shell.
 

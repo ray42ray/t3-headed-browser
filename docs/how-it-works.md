@@ -56,6 +56,15 @@ A full Chromium build passes, and the headless shell doesn't. This tool runs the
    | `--use-angle=vulkan` + Vulkan features | `ANGLE (Intel, Vulkan 1.4.318 (Intel(R) UHD Graphics 630 …), Intel open-source Mesa driver)` |
    | `--use-gl=angle --use-angle=gl-egl` (the shim's) | `ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL ES 3.2)` |
 
+7. **Brand** (default; `install --brand chrome`). A headed Brave is still not a normal browser to every site: its user agent looks like Chrome, but `Sec-CH-UA` announces `Brave` and `navigator.brave` exists. Microsoft's list of browsers allowed through Conditional Access is Edge, Chrome, Firefox and Safari, and a tenant that restricts browsers can refuse Brave even though it is Chromium. The shim therefore loads a small extension of its own:
+
+   - a `declarativeNetRequest` rule rewrites `sec-ch-ua` and `sec-ch-ua-full-version-list` so the brand reads `Google Chrome` at the browser's own version (read from `browser --version` at install time);
+   - a `document_start` script in the main world does the same for `navigator.userAgentData` and hides `navigator.brave`.
+
+   It is the trick Brave itself uses for sites on its `brave-checks` list. T3 passes `--disable-extensions`, so the shim adds `--disable-extensions-except` and `--load-extension` and no other extension loads. `--brand brave` turns it off, and the `T3_HEADED_BROWSER_BRAND` environment variable overrides it per launch.
+
+   Two limits: T3's isolated and incognito tabs run in a throwaway context, which Chromium does not give extensions, so they stay Brave; and this only changes the browser a site sees, not the device. Microsoft still sees an unregistered Linux device, which no browser setting can claim.
+
 The shim receives Playwright's `--remote-debugging-pipe` file descriptors (3 and 4) and passes them on unchanged. The second invocation runs with them closed.
 
 ## Staying applied after T3 updates
@@ -73,7 +82,8 @@ The path unit watches `linux64`; on ARM64 hosts, change it to `linux-arm64`. It 
 | Browser executable | `install --browser PATH`. Saved as `browser=` in `${XDG_CONFIG_HOME:-~/.config}/t3-headed-browser/config`. |
 | X display | `install --display :N`. Saved as `display=`; the default is `:99`. |
 | GPU | `install --gpu` (first `/dev/dri/renderD*`), `--gpu=NODE`, or `--no-gpu`. Saved as `gpu=`; empty means off, the default. |
-| Per-launch override | The environment variables `T3_HEADED_BROWSER`, `T3_HEADED_BROWSER_DISPLAY` and `T3_HEADED_BROWSER_GPU` (empty turns the GPU off), read by the shim at launch time. They must be set in the T3 service's environment. |
+| Brand | `install --brand chrome` (default) or `--brand brave`. Saved as `brand=`. |
+| Per-launch override | The environment variables `T3_HEADED_BROWSER`, `T3_HEADED_BROWSER_DISPLAY`, `T3_HEADED_BROWSER_BRAND` and `T3_HEADED_BROWSER_GPU` (empty turns the GPU off), read by the shim at launch time. They must be set in the T3 service's environment. |
 | T3 home | `T3CODE_HOME`, default `~/.t3`. |
 
 Point `--browser` at the real binary, such as `/opt/google/chrome/chrome` or `/opt/brave.com/brave/brave`, rather than at a launcher script in `/usr/bin`. The shim then watches the browser's own PID. A launcher that runs the browser as a child process still works. Snap-packaged browsers are untested.
@@ -87,4 +97,5 @@ After changing the configuration, run `t3-headed-browser install` again. Shims t
 - **`browserContext.newPage: Target page, context or browser has been closed`.** Something other than this shim runs a headed browser for T3, or the browser exited at startup. Run the browser by hand on the same display to see its errors: `DISPLAY=:99 /opt/brave.com/brave/brave --user-data-dir=$(mktemp -d) about:blank`.
 - **Profile from a newer browser.** T3's profiles live in `~/.t3/userdata/server-browser/profiles/`. If the browser you configured is older than the Chromium that last wrote a profile, it may refuse that profile. Back the profile up first, then move it aside or use a newer browser.
 - **WebGL still reports SwiftShader with `--gpu`.** Check `t3-headed-browser status`. The T3 service user needs read and write access to the render node: add it to the `render` group (`sudo usermod -aG render $USER`, then restart T3) rather than relying on the desktop seat ACL. Then stop the running browser so the next tab relaunches through the shim.
+- **A site still sees Brave.** The brand extension lives in `${XDG_CONFIG_HOME:-~/.config}/t3-headed-browser/extension` and is written by `install`. If it is missing, or you set `--brand brave`, the panel reports the browser's own brand. Isolated and incognito tabs always do. Then run `t3-headed-browser install` and open a new tab.
 - **Re-application log.** Run `journalctl --user -u t3-headed-browser.service`.
